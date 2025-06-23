@@ -1,314 +1,216 @@
-function reorganize_ecg_database()
-    % ECG Database Reorganization Script
-    % Reorganizes ECG data into clinical groups and creates balanced datasets
+function organize_ecg_database()
+    % Organize ECG database into clinical groups with age labeling
+    % Creates balanced training/validation datasets
     
     % Define paths
-    base_path = 'C:\Users\henry\Downloads\ECG-Dx\Raw Download\a-large-scale-12-lead-electrocardiogram-database-for-arrhythmia-study-1.0.0\WFDBRecords';
+    source_path = 'C:\Users\henry\Downloads\ECG-Dx\Raw Download\a-large-scale-12-lead-electrocardiogram-database-for-arrhythmia-study-1.0.0\WFDBRecords';
     output_path = 'C:\Users\henry\Downloads\ECG-Dx\Organized_Dataset';
     
+    % SNOMED CT codes for each group (from CSV analysis)
+    snomed_groups = containers.Map();
+    snomed_groups('SB') = [426177001];  % Sinus Bradycardia
+    snomed_groups('AFIB') = [164889003, 164890007];  % Atrial Fibrillation + Flutter
+    snomed_groups('SR') = [426783006];  % Sinus Rhythm
+    
+    fprintf('=== ECG DATABASE ORGANIZATION ===\n');
+    fprintf('Source path: %s\n', source_path);
+    fprintf('Output path: %s\n', output_path);
+    fprintf('Target groups: SB, AFIB, SR\n\n');
+    
     % Create output directories
+    create_output_directories(output_path);
+    
+    % Initialize counters
+    stats = struct();
+    stats.total_processed = 0;
+    stats.SB = 0;
+    stats.AFIB = 0;
+    stats.SR = 0;
+    stats.unclassified = 0;
+    stats.errors = 0;
+    
+    % Patient data storage
+    patients = struct();
+    patients.SB = {};
+    patients.AFIB = {};
+    patients.SR = {};
+    
+    % Process all folders and subfolders
+    fprintf('Scanning database and extracting patient information...\n');
+    
+    % Get all first-level directories (should be 46 folders)
+    first_level_dirs = dir(source_path);
+    first_level_dirs = first_level_dirs([first_level_dirs.isdir] & ~ismember({first_level_dirs.name}, {'.', '..'}));
+    
+    fprintf('Found %d first-level directories\n', length(first_level_dirs));
+    
+    for i = 1:length(first_level_dirs)
+        first_level_path = fullfile(source_path, first_level_dirs(i).name);
+        
+        % Get second-level directories (should be 10 subfolders each)
+        second_level_dirs = dir(first_level_path);
+        second_level_dirs = second_level_dirs([second_level_dirs.isdir] & ~ismember({second_level_dirs.name}, {'.', '..'}));
+        
+        for j = 1:length(second_level_dirs)
+            second_level_path = fullfile(first_level_path, second_level_dirs(j).name);
+            
+            % Process all .hea files in this subfolder
+            hea_files = dir(fullfile(second_level_path, '*.hea'));
+            
+            fprintf('Processing %s/%s: %d patients\n', first_level_dirs(i).name, second_level_dirs(j).name, length(hea_files));
+            
+            for k = 1:length(hea_files)
+                try
+                    % Parse header file
+                    hea_file_path = fullfile(second_level_path, hea_files(k).name);
+                    patient_info = parse_header_file(hea_file_path);
+                    
+                    if isempty(patient_info)
+                        stats.errors = stats.errors + 1;
+                        continue;
+                    end
+                    
+                    stats.total_processed = stats.total_processed + 1;
+                    
+                    % Classify patient based on diagnosis codes
+                    group = classify_patient(patient_info.dx_codes, snomed_groups);
+                    
+                    if ~isempty(group)
+                        % Add patient to appropriate group
+                        patient_info.source_folder = second_level_path;
+                        patient_info.base_name = hea_files(k).name(1:end-4); % Remove .hea extension
+                        
+                        patients.(group){end+1} = patient_info;
+                        stats.(group) = stats.(group) + 1;
+                    else
+                        stats.unclassified = stats.unclassified + 1;
+                    end
+                    
+                catch ME
+                    fprintf('Error processing %s: %s\n', hea_files(k).name, ME.message);
+                    stats.errors = stats.errors + 1;
+                end
+            end
+        end
+        
+        % Progress update
+        if mod(i, 5) == 0
+            fprintf('Completed %d/%d first-level directories\n', i, length(first_level_dirs));
+        end
+    end
+    
+    % Display classification statistics
+    display_statistics(stats);
+    
+    % Create balanced dataset
+    fprintf('\n=== CREATING BALANCED DATASET ===\n');
+    create_balanced_dataset(patients, output_path, stats);
+    
+    % Generate final report
+    generate_organization_report(output_path, stats, patients);
+    
+    fprintf('\nOrganization complete! Check the output directory: %s\n', output_path);
+end
+
+function create_output_directories(output_path)
+    % Create the organized dataset directory structure
+    
     if ~exist(output_path, 'dir')
         mkdir(output_path);
     end
     
-    % Define SNOMED CT code mappings based on clinical groupings
-    group_codes = containers.Map();
+    datasets = {'training', 'validation'};
+    groups = {'SB', 'AFIB', 'SR'};
     
-    % SB: Sinus Bradycardia
-    group_codes('SB') = [426177001];
-    
-    % AFIB: Atrial Fibrillation + Atrial Flutter  
-    group_codes('AFIB') = [164889003, 164890007];
-    
-    % GSVT: Supraventricular Tachycardia, Atrial Tachycardia, AVRT
-    group_codes('GSVT') = [426761007, 713422000, 233897008];
-    
-    % SR: Sinus Rhythm + Sinus Irregularity
-    group_codes('SR') = [426783006, 427393009];
-    
-    % Initialize data structures
-    groups = {'SB', 'AFIB', 'GSVT', 'SR'};
-    patient_data = containers.Map();
-    for i = 1:length(groups)
-        patient_data(groups{i}) = {};
-    end
-    
-    % Process all ECG files
-    fprintf('Starting ECG database reorganization...\n');
-    fprintf('Scanning directory: %s\n', base_path);
-    
-    total_processed = 0;
-    total_categorized = 0;
-    file_errors = 0;
-    
-    % Get all subdirectories (46 folders)
-    main_dirs = dir(base_path);
-    main_dirs = main_dirs([main_dirs.isdir] & ~ismember({main_dirs.name}, {'.', '..'}));
-    
-    fprintf('Found %d main directories to process\n', length(main_dirs));
-    
-    for i = 1:length(main_dirs)
-        main_dir_path = fullfile(base_path, main_dirs(i).name);
-        fprintf('Processing main directory %d/%d: %s\n', i, length(main_dirs), main_dirs(i).name);
-        
-        % Get subdirectories (10 subfolders each)
-        sub_dirs = dir(main_dir_path);
-        sub_dirs = sub_dirs([sub_dirs.isdir] & ~ismember({sub_dirs.name}, {'.', '..'}));
-        
-        for j = 1:length(sub_dirs)
-            sub_dir_path = fullfile(main_dir_path, sub_dirs(j).name);
-            fprintf('  Processing subdirectory %d/%d: %s\n', j, length(sub_dirs), sub_dirs(j).name);
-            
-            % Quick check of directory contents
-            all_files = dir(sub_dir_path);
-            hea_count = sum(endsWith({all_files.name}, '.hea'));
-            mat_count = sum(endsWith({all_files.name}, '.mat'));
-            fprintf('    Found %d .hea files and %d .mat files\n', hea_count, mat_count);
-            
-            % Get all .hea files (header files)
-            hea_files = dir(fullfile(sub_dir_path, '*.hea'));
-            % Get all .mat files for matching
-            mat_files = dir(fullfile(sub_dir_path, '*.mat'));
-            
-            for k = 1:length(hea_files)
-                total_processed = total_processed + 1;
-                
-                hea_file_path = fullfile(sub_dir_path, hea_files(k).name);
-                
-                % Find corresponding .mat file (handle duplicates like "filename (1).mat")
-                [~, base_name, ~] = fileparts(hea_files(k).name);
-                mat_file_path = find_matching_mat_file(sub_dir_path, base_name, mat_files);
-                
-                % Skip if no matching .mat file found
-                if isempty(mat_file_path)
-                    fprintf('Warning: No matching .mat file found for %s\n', hea_files(k).name);
-                    file_errors = file_errors + 1;
-                    continue;
-                end
-                
-                % Extract patient information from header file
-                patient_info = extract_patient_info(hea_file_path);
-                
-                if ~isempty(patient_info)
-                    % Determine group based on SNOMED CT codes
-                    assigned_group = assign_to_group(patient_info.dx_codes, group_codes);
-                    
-                    if ~isempty(assigned_group)
-                        total_categorized = total_categorized + 1;
-                        
-                        % Create patient record
-                        record = struct();
-                        record.patient_id = patient_info.patient_id;
-                        record.age = patient_info.age;
-                        record.sex = patient_info.sex;
-                        record.dx_codes = patient_info.dx_codes;
-                        record.hea_file = hea_file_path;
-                        record.mat_file = mat_file_path;
-                        record.original_path = sub_dir_path;
-                        
-                        % Add to appropriate group
-                        current_data = patient_data(assigned_group);
-                        current_data{end+1} = record;
-                        patient_data(assigned_group) = current_data;
-                    end
-                end
-                
-                % Progress update every 1000 files
-                if mod(total_processed, 1000) == 0
-                    fprintf('    Processed %d files...\n', total_processed);
-                end
+    for i = 1:length(datasets)
+        for j = 1:length(groups)
+            dir_path = fullfile(output_path, datasets{i}, groups{j});
+            if ~exist(dir_path, 'dir')
+                mkdir(dir_path);
             end
         end
     end
-    
-    % Display distribution
-    fprintf('\n=== DISTRIBUTION SUMMARY ===\n');
-    fprintf('Total files processed: %d\n', total_processed);
-    fprintf('Total files categorized: %d\n', total_categorized);
-    fprintf('File errors encountered: %d\n', file_errors);
-    fprintf('Distribution by group:\n');
-    
-    group_sizes = zeros(1, length(groups));
-    for i = 1:length(groups)
-        group_data = patient_data(groups{i});
-        group_sizes(i) = length(group_data);
-        fprintf('  %s: %d patients\n', groups{i}, group_sizes(i));
-    end
-    
-    % Find minimum group size for balancing
-    min_size = min(group_sizes);
-    fprintf('\nMinimum group size (for balancing): %d\n', min_size);
-    
-    % Create balanced dataset
-    fprintf('\n=== CREATING BALANCED DATASET ===\n');
-    train_size = floor(min_size * 0.8);
-    val_size = min_size - train_size;
-    
-    fprintf('Training samples per group: %d\n', train_size);
-    fprintf('Validation samples per group: %d\n', val_size);
-    
-    % Create balanced dataset folders and copy files
-    for i = 1:length(groups)
-        group_name = groups{i};
-        group_data = patient_data(group_name);
-        
-        % Randomly sample to balance the dataset
-        if length(group_data) > min_size
-            rand_indices = randperm(length(group_data), min_size);
-            group_data = group_data(rand_indices);
-        end
-        
-        % Split into training and validation
-        train_indices = 1:train_size;
-        val_indices = (train_size+1):min_size;
-        
-        % Create directories
-        train_dir = fullfile(output_path, 'training', group_name);
-        val_dir = fullfile(output_path, 'validation', group_name);
-        
-        if ~exist(train_dir, 'dir')
-            mkdir(train_dir);
-        end
-        if ~exist(val_dir, 'dir')
-            mkdir(val_dir);
-        end
-        
-        % Copy training files
-        fprintf('Copying %s training files...\n', group_name);
-        copy_files_with_age_label(group_data(train_indices), train_dir);
-        
-        % Copy validation files
-        fprintf('Copying %s validation files...\n', group_name);
-        copy_files_with_age_label(group_data(val_indices), val_dir);
-        
-        % Save metadata
-        save_metadata(group_data(train_indices), fullfile(train_dir, 'metadata.mat'));
-        save_metadata(group_data(val_indices), fullfile(val_dir, 'metadata.mat'));
-    end
-    
-    % Generate summary report
-    generate_summary_report(output_path, groups, train_size, val_size, patient_data);
-    
-    fprintf('\n=== REORGANIZATION COMPLETE ===\n');
-    fprintf('Output directory: %s\n', output_path);
 end
 
-function mat_file_path = find_matching_mat_file(directory, base_name, mat_files)
-    % Find matching .mat file for a given base name, handling duplicates
-    mat_file_path = '';
+function patient_info = parse_header_file(hea_file_path)
+    % Parse .hea file to extract patient information
     
-    % First try exact match
-    exact_match = fullfile(directory, [base_name, '.mat']);
-    if exist(exact_match, 'file')
-        mat_file_path = exact_match;
-        return;
-    end
-    
-    % If exact match fails, look through all .mat files for pattern matches
-    for i = 1:length(mat_files)
-        mat_name = mat_files(i).name;
-        [~, mat_base, ~] = fileparts(mat_name);
-        
-        % Check if this mat file matches the base name (handling duplicates)
-        % Remove any duplicate suffixes like " (1)", " (2)", etc.
-        pattern = ' \(\d+\)$';
-        clean_mat_base = regexprep(mat_base, pattern, '');
-        
-        if strcmp(clean_mat_base, base_name)
-            mat_file_path = fullfile(directory, mat_name);
-            return;
-        end
-    end
-    
-    % If still no match, try more flexible matching
-    for i = 1:length(mat_files)
-        mat_name = mat_files(i).name;
-        if contains(mat_name, base_name)
-            mat_file_path = fullfile(directory, mat_name);
-            return;
-        end
-    end
-end
-
-function patient_info = extract_patient_info(hea_file_path)
-    % Extract patient information from header file
-    patient_info = struct();
-    patient_info.patient_id = '';
-    patient_info.age = NaN;
-    patient_info.sex = '';
-    patient_info.dx_codes = [];
+    patient_info = [];
     
     try
+        % Read header file
         fid = fopen(hea_file_path, 'r');
         if fid == -1
             return;
         end
         
-        % Read file line by line
-        while ~feof(fid)
-            line = fgetl(fid);
-            if ischar(line)
-                % Extract patient ID from first line
-                if isempty(patient_info.patient_id) && ~startsWith(line, '#')
-                    parts = strsplit(line);
-                    if ~isempty(parts)
-                        patient_info.patient_id = parts{1};
-                    end
-                end
-                
+        content = textscan(fid, '%s', 'Delimiter', '\n');
+        fclose(fid);
+        
+        lines = content{1};
+        
+        % Initialize patient info structure
+        patient_info = struct();
+        patient_info.age = [];
+        patient_info.sex = '';
+        patient_info.dx_codes = [];
+        
+        % Parse each line
+        for i = 1:length(lines)
+            line = lines{i};
+            
+            if startsWith(line, '#Age:')
                 % Extract age
-                if startsWith(line, '#Age:')
-                    age_str = strtrim(strrep(line, '#Age:', ''));
-                    patient_info.age = str2double(age_str);
-                end
+                age_str = strtrim(strrep(line, '#Age:', ''));
+                patient_info.age = str2double(age_str);
                 
+            elseif startsWith(line, '#Sex:')
                 % Extract sex
-                if startsWith(line, '#Sex:')
-                    patient_info.sex = strtrim(strrep(line, '#Sex:', ''));
-                end
+                patient_info.sex = strtrim(strrep(line, '#Sex:', ''));
                 
+            elseif startsWith(line, '#Dx:')
                 % Extract diagnosis codes
-                if startsWith(line, '#Dx:')
-                    dx_str = strtrim(strrep(line, '#Dx:', ''));
-                    if ~strcmp(dx_str, 'Unknown') && ~isempty(dx_str)
-                        % Split by comma and convert to numbers
-                        dx_parts = strsplit(dx_str, ',');
-                        dx_codes = [];
-                        for k = 1:length(dx_parts)
-                            code = str2double(strtrim(dx_parts{k}));
-                            if ~isnan(code)
-                                dx_codes(end+1) = code;
-                            end
+                dx_str = strtrim(strrep(line, '#Dx:', ''));
+                if ~isempty(dx_str)
+                    % Split by comma and convert to numbers
+                    dx_codes_str = strsplit(dx_str, ',');
+                    dx_codes = [];
+                    for j = 1:length(dx_codes_str)
+                        code = str2double(strtrim(dx_codes_str{j}));
+                        if ~isnan(code)
+                            dx_codes(end+1) = code;
                         end
-                        patient_info.dx_codes = dx_codes;
                     end
+                    patient_info.dx_codes = dx_codes;
                 end
             end
         end
         
-        fclose(fid);
+        % Validate required fields
+        if isempty(patient_info.age) || isnan(patient_info.age) || isempty(patient_info.dx_codes)
+            patient_info = [];
+        end
         
     catch ME
-        fprintf('Error reading file %s: %s\n', hea_file_path, ME.message);
-        if exist('fid', 'var') && fid ~= -1
-            fclose(fid);
-        end
+        patient_info = [];
     end
 end
 
-function group = assign_to_group(dx_codes, group_codes)
-    % Assign patient to clinical group based on diagnosis codes
+function group = classify_patient(dx_codes, snomed_groups)
+    % Classify patient into one of the three groups based on diagnosis codes
+    
     group = '';
     
     if isempty(dx_codes)
         return;
     end
     
-    groups = keys(group_codes);
+    % Check each group for matching codes
+    group_names = keys(snomed_groups);
     
-    for i = 1:length(groups)
-        group_name = groups{i};
-        target_codes = group_codes(group_name);
+    for i = 1:length(group_names)
+        group_name = group_names{i};
+        target_codes = snomed_groups(group_name);
         
         % Check if any diagnosis code matches this group
         if any(ismember(dx_codes, target_codes))
@@ -318,122 +220,250 @@ function group = assign_to_group(dx_codes, group_codes)
     end
 end
 
-function copy_files_with_age_label(patient_records, dest_dir)
-    % Copy files with age information in filename
-    for i = 1:length(patient_records)
-        record = patient_records{i};
+function display_statistics(stats)
+    % Display classification statistics
+    
+    fprintf('\n=== CLASSIFICATION STATISTICS ===\n');
+    fprintf('Total files processed: %d\n', stats.total_processed);
+    fprintf('Successfully classified:\n');
+    fprintf('  SB (Sinus Bradycardia): %d\n', stats.SB);
+    fprintf('  AFIB (Atrial Fibrillation/Flutter): %d\n', stats.AFIB);
+    fprintf('  SR (Sinus Rhythm): %d\n', stats.SR);
+    fprintf('Unclassified: %d\n', stats.unclassified);
+    fprintf('Errors: %d\n', stats.errors);
+    
+    total_classified = stats.SB + stats.AFIB + stats.SR;
+    if total_classified > 0
+        fprintf('\nDistribution:\n');
+        fprintf('  SB: %.1f%%\n', (stats.SB / total_classified) * 100);
+        fprintf('  AFIB: %.1f%%\n', (stats.AFIB / total_classified) * 100);
+        fprintf('  SR: %.1f%%\n', (stats.SR / total_classified) * 100);
+    end
+end
+
+function create_balanced_dataset(patients, output_path, stats)
+    % Create balanced training/validation datasets
+    
+    % Find the minimum count among the three groups
+    group_counts = [stats.SB, stats.AFIB, stats.SR];
+    min_count = min(group_counts);
+    
+    fprintf('Minimum group size: %d patients\n', min_count);
+    fprintf('Creating balanced dataset with %d patients per group\n', min_count);
+    
+    % Training/validation split
+    train_ratio = 0.8;
+    train_count = floor(min_count * train_ratio);
+    val_count = min_count - train_count;
+    
+    fprintf('Training set: %d patients per group\n', train_count);
+    fprintf('Validation set: %d patients per group\n', val_count);
+    
+    group_names = {'SB', 'AFIB', 'SR'};
+    
+    for i = 1:length(group_names)
+        group_name = group_names{i};
+        group_patients = patients.(group_name);
         
-        % Verify files exist before copying
-        if ~exist(record.hea_file, 'file')
-            fprintf('Warning: Header file not found: %s\n', record.hea_file);
-            continue;
-        end
+        fprintf('\nProcessing %s group (%d patients available)...\n', group_name, length(group_patients));
         
-        if ~exist(record.mat_file, 'file')
-            fprintf('Warning: Data file not found: %s\n', record.mat_file);
-            continue;
-        end
+        % Randomly shuffle patients
+        rng(42); % Set seed for reproducibility
+        shuffled_indices = randperm(length(group_patients));
+        
+        % Select balanced subset
+        selected_patients = group_patients(shuffled_indices(1:min_count));
+        
+        % Split into training and validation
+        train_patients = selected_patients(1:train_count);
+        val_patients = selected_patients(train_count+1:end);
+        
+        % Copy training files
+        copy_patient_files(train_patients, output_path, 'training', group_name);
+        
+        % Copy validation files
+        copy_patient_files(val_patients, output_path, 'validation', group_name);
+    end
+end
+
+function copy_patient_files(patients, output_path, dataset_type, group_name)
+    % Copy patient files to organized directory with age labeling
+    
+    target_dir = fullfile(output_path, dataset_type, group_name);
+    
+    for i = 1:length(patients)
+        patient = patients{i};
         
         % Create age-labeled filename
-        [~, base_name, ~] = fileparts(record.patient_id);
-        age_suffix = sprintf('_age%d', record.age);
+        age_label = sprintf('age%d', patient.age);
+        new_base_name = sprintf('%s_%s', patient.base_name, age_label);
         
+        % Source files
+        source_hea = fullfile(patient.source_folder, [patient.base_name '.hea']);
+        source_mat = fullfile(patient.source_folder, [patient.base_name '.mat']);
+        
+        % Target files
+        target_hea = fullfile(target_dir, [new_base_name '.hea']);
+        target_mat = fullfile(target_dir, [new_base_name '.mat']);
+        
+        % Copy files
         try
-            % Copy .hea file
-            new_hea_name = sprintf('%s%s.hea', base_name, age_suffix);
-            dest_hea_path = fullfile(dest_dir, new_hea_name);
-            copyfile(record.hea_file, dest_hea_path);
-            
-            % Copy .mat file
-            new_mat_name = sprintf('%s%s.mat', base_name, age_suffix);
-            dest_mat_path = fullfile(dest_dir, new_mat_name);
-            copyfile(record.mat_file, dest_mat_path);
-            
+            copyfile(source_hea, target_hea);
+            copyfile(source_mat, target_mat);
         catch ME
-            fprintf('Error copying files for patient %s: %s\n', record.patient_id, ME.message);
-            fprintf('  Source HEA: %s\n', record.hea_file);
-            fprintf('  Source MAT: %s\n', record.mat_file);
-            continue;
+            fprintf('Error copying files for %s: %s\n', patient.base_name, ME.message);
         end
     end
+    
+    fprintf('  Copied %d patients to %s/%s\n', length(patients), dataset_type, group_name);
 end
 
-function save_metadata(patient_records, metadata_file)
-    % Save patient metadata for later analysis
-    metadata = struct();
+function generate_organization_report(output_path, stats, patients)
+    % Generate comprehensive organization report
     
-    for i = 1:length(patient_records)
-        record = patient_records{i};
-        metadata(i).patient_id = record.patient_id;
-        metadata(i).age = record.age;
-        metadata(i).sex = record.sex;
-        metadata(i).dx_codes = record.dx_codes;
-        metadata(i).original_path = record.original_path;
-    end
-    
-    save(metadata_file, 'metadata');
-end
-
-function generate_summary_report(output_path, groups, train_size, val_size, patient_data)
-    % Generate comprehensive summary report
-    report_file = fullfile(output_path, 'reorganization_summary.txt');
-    
+    report_file = fullfile(output_path, 'organization_report.txt');
     fid = fopen(report_file, 'w');
     
-    fprintf(fid, '=== ECG DATABASE REORGANIZATION SUMMARY ===\n');
+    fprintf(fid, '=== ECG DATABASE ORGANIZATION REPORT ===\n');
     fprintf(fid, 'Date: %s\n\n', datestr(now));
     
-    fprintf(fid, 'CLINICAL GROUPS:\n');
-    fprintf(fid, '- SB: Sinus Bradycardia\n');
-    fprintf(fid, '- AFIB: Atrial Fibrillation + Atrial Flutter\n');
-    fprintf(fid, '- GSVT: Supraventricular Tachycardia, Atrial Tachycardia, AVRT\n');
-    fprintf(fid, '- SR: Sinus Rhythm + Sinus Irregularity\n\n');
+    fprintf(fid, 'ORIGINAL DATABASE STATISTICS:\n');
+    fprintf(fid, 'Total files processed: %d\n', stats.total_processed);
+    fprintf(fid, 'SB (Sinus Bradycardia): %d\n', stats.SB);
+    fprintf(fid, 'AFIB (Atrial Fibrillation/Flutter): %d\n', stats.AFIB);
+    fprintf(fid, 'SR (Sinus Rhythm): %d\n', stats.SR);
+    fprintf(fid, 'Unclassified: %d\n', stats.unclassified);
+    fprintf(fid, 'Errors: %d\n\n', stats.errors);
     
-    fprintf(fid, 'BALANCED DATASET CONFIGURATION:\n');
-    fprintf(fid, 'Training samples per group: %d (80%%)\n', train_size);
-    fprintf(fid, 'Validation samples per group: %d (20%%)\n\n', val_size);
+    fprintf(fid, 'SNOMED CT CODE MAPPING:\n');
+    fprintf(fid, 'SB: 426177001 (Sinus Bradycardia)\n');
+    fprintf(fid, 'AFIB: 164889003 (Atrial Fibrillation), 164890007 (Atrial Flutter)\n');
+    fprintf(fid, 'SR: 426783006 (Sinus Rhythm)\n\n');
     
-    fprintf(fid, 'GROUP DISTRIBUTIONS:\n');
-    total_available = 0;
-    for i = 1:length(groups)
-        group_data = patient_data(groups{i});
-        available = length(group_data);
-        total_available = total_available + available;
-        fprintf(fid, '%s: %d available, %d used in balanced dataset\n', ...
-                groups{i}, available, train_size + val_size);
-    end
+    % Balanced dataset info
+    group_counts = [stats.SB, stats.AFIB, stats.SR];
+    min_count = min(group_counts);
+    train_count = floor(min_count * 0.8);
+    val_count = min_count - train_count;
     
-    fprintf(fid, '\nTotal available samples: %d\n', total_available);
-    fprintf(fid, 'Total used in balanced dataset: %d\n', (train_size + val_size) * length(groups));
+    fprintf(fid, 'BALANCED DATASET:\n');
+    fprintf(fid, 'Patients per group: %d\n', min_count);
+    fprintf(fid, 'Training set: %d patients per group (%d total)\n', train_count, train_count * 3);
+    fprintf(fid, 'Validation set: %d patients per group (%d total)\n', val_count, val_count * 3);
+    fprintf(fid, 'Total organized patients: %d\n\n', min_count * 3);
+    
+    fprintf(fid, 'DIRECTORY STRUCTURE:\n');
+    fprintf(fid, 'training/\n');
+    fprintf(fid, '  SB/     - %d patients\n', train_count);
+    fprintf(fid, '  AFIB/   - %d patients\n', train_count);
+    fprintf(fid, '  SR/     - %d patients\n', train_count);
+    fprintf(fid, 'validation/\n');
+    fprintf(fid, '  SB/     - %d patients\n', val_count);
+    fprintf(fid, '  AFIB/   - %d patients\n', val_count);
+    fprintf(fid, '  SR/     - %d patients\n', val_count);
+    
+    fprintf(fid, '\nFILE NAMING CONVENTION:\n');
+    fprintf(fid, 'Format: [ORIGINAL_ID]_age[AGE].[ext]\n');
+    fprintf(fid, 'Example: JS44176_age62.mat, JS44176_age62.hea\n');
     
     % Age distribution analysis
-    fprintf(fid, '\nAGE DISTRIBUTION BY GROUP:\n');
-    for i = 1:length(groups)
-        group_data = patient_data(groups{i});
-        if ~isempty(group_data)
-            ages = [];
-            for j = 1:length(group_data)
-                if ~isnan(group_data{j}.age)
-                    ages(end+1) = group_data{j}.age;
-                end
-            end
-            
-            if ~isempty(ages)
-                fprintf(fid, '%s: Mean=%.1f, Std=%.1f, Range=[%d-%d]\n', ...
-                        groups{i}, mean(ages), std(ages), min(ages), max(ages));
-            end
+    fprintf(fid, '\nAGE DISTRIBUTION ANALYSIS:\n');
+    group_names = {'SB', 'AFIB', 'SR'};
+    for i = 1:length(group_names)
+        group_name = group_names{i};
+        group_patients = patients.(group_name);
+        
+        if ~isempty(group_patients)
+            ages = cellfun(@(p) p.age, group_patients);
+            fprintf(fid, '%s: Mean age = %.1f ± %.1f (range: %d-%d)\n', ...
+                    group_name, mean(ages), std(ages), min(ages), max(ages));
         end
     end
-    
-    fprintf(fid, '\nFILE ORGANIZATION:\n');
-    fprintf(fid, 'Training data: training/[GROUP]/[PATIENT_ID]_age[AGE].[ext]\n');
-    fprintf(fid, 'Validation data: validation/[GROUP]/[PATIENT_ID]_age[AGE].[ext]\n');
-    fprintf(fid, 'Metadata files: [training|validation]/[GROUP]/metadata.mat\n');
     
     fclose(fid);
     
-    fprintf('Summary report saved to: %s\n', report_file);
+    fprintf('Organization report saved to: %s\n', report_file);
 end
 
-% Run the reorganization
-reorganize_ecg_database();
+function analyze_age_distributions(patients)
+    % Analyze and visualize age distributions across groups
+    
+    fprintf('\n=== AGE DISTRIBUTION ANALYSIS ===\n');
+    
+    group_names = {'SB', 'AFIB', 'SR'};
+    colors = {'blue', 'red', 'green'};
+    
+    figure('Position', [100, 100, 1200, 400]);
+    
+    for i = 1:length(group_names)
+        group_name = group_names{i};
+        group_patients = patients.(group_name);
+        
+        if ~isempty(group_patients)
+            ages = cellfun(@(p) p.age, group_patients);
+            
+            fprintf('%s Group:\n', group_name);
+            fprintf('  Patients: %d\n', length(ages));
+            fprintf('  Age range: %d - %d years\n', min(ages), max(ages));
+            fprintf('  Mean age: %.1f ± %.1f years\n', mean(ages), std(ages));
+            fprintf('  Median age: %.1f years\n', median(ages));
+            
+            % Age group analysis
+            age_groups = {[0, 30], [31, 50], [51, 70], [71, 100]};
+            age_group_names = {'≤30', '31-50', '51-70', '>70'};
+            
+            fprintf('  Age distribution:\n');
+            for j = 1:length(age_groups)
+                count = sum(ages >= age_groups{j}(1) & ages <= age_groups{j}(2));
+                percentage = (count / length(ages)) * 100;
+                fprintf('    %s years: %d (%.1f%%)\n', age_group_names{j}, count, percentage);
+            end
+            fprintf('\n');
+            
+            % Plot histogram
+            subplot(1, 3, i);
+            histogram(ages, 20, 'FaceColor', colors{i}, 'EdgeColor', 'black', 'FaceAlpha', 0.7);
+            title(sprintf('%s Group (n=%d)', group_name, length(ages)));
+            xlabel('Age (years)');
+            ylabel('Frequency');
+            grid on;
+        end
+    end
+    
+    sgtitle('Age Distributions Across ECG Groups', 'FontSize', 14, 'FontWeight', 'bold');
+end
+
+% Helper function to verify the organization
+function verify_organization(output_path)
+    % Verify that the organization was successful
+    
+    fprintf('\n=== VERIFICATION ===\n');
+    
+    datasets = {'training', 'validation'};
+    groups = {'SB', 'AFIB', 'SR'};
+    
+    for i = 1:length(datasets)
+        fprintf('%s dataset:\n', datasets{i});
+        
+        for j = 1:length(groups)
+            group_dir = fullfile(output_path, datasets{i}, groups{j});
+            
+            if exist(group_dir, 'dir')
+                mat_files = dir(fullfile(group_dir, '*.mat'));
+                hea_files = dir(fullfile(group_dir, '*.hea'));
+                
+                fprintf('  %s: %d .mat files, %d .hea files\n', groups{j}, length(mat_files), length(hea_files));
+                
+                % Check if file counts match
+                if length(mat_files) ~= length(hea_files)
+                    fprintf('    WARNING: Mismatch in file counts!\n');
+                end
+            else
+                fprintf('  %s: Directory not found\n', groups{j});
+            end
+        end
+    end
+end
+
+% Run the organization
+organize_ecg_database();

@@ -1,6 +1,6 @@
 function convert_ecg_lead2_to_scalograms()
     % Convert ECG signals to scalogram images using Continuous Wavelet Transform
-    % MODIFIED: Only processes first 4 seconds of Lead II
+    % FOCUS: Only processes first 4 seconds of Lead II
     % Uses analytic Morlet wavelet with 12 voices per octave
     % Output: 227x227 RGB images with jet colormap
     
@@ -25,7 +25,7 @@ function convert_ecg_lead2_to_scalograms()
     total_converted = 0;
     conversion_errors = 0;
     
-    fprintf('=== ECG LEAD II TO SCALOGRAM CONVERSION ===\n');
+    fprintf('=== ECG LEAD II TO SCALOGRAM CONVERSION (4 SECONDS) ===\n');
     fprintf('Dataset path: %s\n', dataset_path);
     fprintf('Output path: %s\n', output_path);
     fprintf('Target image size: %dx%d pixels\n', target_size(1), target_size(2));
@@ -36,7 +36,7 @@ function convert_ecg_lead2_to_scalograms()
     
     % Process both training and validation sets
     datasets = {'training', 'validation'};
-    groups = {'SB', 'AFIB', 'GSVT', 'SR'};
+    groups = {'AFIB', 'SB', 'SR'}; % Updated to only include your 3 specified folders
     
     for dataset_idx = 1:length(datasets)
         dataset_name = datasets{dataset_idx};
@@ -117,7 +117,7 @@ function convert_ecg_lead2_to_scalograms()
                     total_converted = total_converted + 1;
                     
                     % Progress update
-                    if mod(total_processed, 100) == 0
+                    if mod(total_processed, 50) == 0
                         fprintf('    Processed %d files...\n', total_processed);
                     end
                     
@@ -128,7 +128,8 @@ function convert_ecg_lead2_to_scalograms()
                 end
             end
             
-            fprintf('  Completed %s group\n', group_name);
+            fprintf('  Completed %s group: %d files converted\n', group_name, ...
+                   count_converted_files(output_dir));
         end
         
         fprintf('Completed %s dataset\n\n', dataset_name);
@@ -139,10 +140,14 @@ function convert_ecg_lead2_to_scalograms()
     fprintf('Total files processed: %d\n', total_processed);
     fprintf('Successfully converted: %d\n', total_converted);
     fprintf('Conversion errors: %d\n', conversion_errors);
+    fprintf('Success rate: %.1f%%\n', (total_converted/total_processed)*100);
     fprintf('Output directory: %s\n', output_path);
     
     % Generate conversion report
     generate_lead2_conversion_report(output_path, total_processed, total_converted, conversion_errors, duration_seconds);
+    
+    % Generate dataset statistics
+    analyze_lead2_dataset();
 end
 
 function ecg_signals = extract_ecg_signals(ecg_data)
@@ -191,10 +196,22 @@ function scalogram_img = generate_lead2_scalogram(signal, fs, voices_per_octave,
     % Preprocess signal
     signal = double(signal);
     signal = signal - mean(signal); % Remove DC component
-    signal = signal / (std(signal) + eps);  % Normalize (add eps to avoid division by zero)
+    
+    % Robust normalization
+    signal_std = std(signal);
+    if signal_std > eps
+        signal = signal / signal_std;  % Normalize
+    else
+        signal = signal; % Keep as is if std is too small
+    end
     
     % Apply CWT with analytic Morlet wavelet
-    [wt, frequencies] = cwt(signal, 'amor', fs, 'VoicesPerOctave', voices_per_octave);
+    try
+        [wt, frequencies] = cwt(signal, 'amor', fs, 'VoicesPerOctave', voices_per_octave);
+    catch
+        % Fallback for older MATLAB versions
+        [wt, frequencies] = cwt(signal, 'amor', fs);
+    end
     
     % Convert to scalogram (magnitude)
     scalogram = abs(wt);
@@ -202,7 +219,7 @@ function scalogram_img = generate_lead2_scalogram(signal, fs, voices_per_octave,
     % Apply logarithmic scaling for better visualization
     scalogram = log10(scalogram + eps);
     
-    % Normalize to [0, 1] range
+    % Robust normalization to [0, 1] range
     scalogram_min = min(scalogram(:));
     scalogram_max = max(scalogram(:));
     if scalogram_max > scalogram_min
@@ -216,13 +233,24 @@ function scalogram_img = generate_lead2_scalogram(signal, fs, voices_per_octave,
     
     % Convert scalogram to RGB image
     scalogram_indexed = round(scalogram * 127) + 1; % Map to 1-128 range
+    scalogram_indexed = max(1, min(128, scalogram_indexed)); % Clamp values
     scalogram_rgb = ind2rgb(scalogram_indexed, jet_colormap);
     
-    % Resize to target dimensions
-    scalogram_img = imresize(scalogram_rgb, target_size, 'bilinear');
+    % Resize to target dimensions using bicubic interpolation for better quality
+    scalogram_img = imresize(scalogram_rgb, target_size, 'bicubic');
     
     % Convert to uint8 for image saving
     scalogram_img = uint8(scalogram_img * 255);
+end
+
+function count = count_converted_files(output_dir)
+    % Count successfully converted files in output directory
+    if exist(output_dir, 'dir')
+        files = dir(fullfile(output_dir, '*_Lead2_4sec.png'));
+        count = length(files);
+    else
+        count = 0;
+    end
 end
 
 function generate_lead2_conversion_report(output_path, total_processed, total_converted, conversion_errors, duration_seconds)
@@ -243,7 +271,13 @@ function generate_lead2_conversion_report(output_path, total_processed, total_co
     fprintf(fid, '- Target image size: 227x227 pixels\n');
     fprintf(fid, '- Color format: RGB\n');
     fprintf(fid, '- Colormap: Jet (128 colors)\n');
+    fprintf(fid, '- Interpolation: Bicubic\n');
     fprintf(fid, '- Sampling frequency: 500 Hz\n\n');
+    
+    fprintf(fid, 'DATASET STRUCTURE:\n');
+    fprintf(fid, '- Groups processed: AFIB, SB, SR\n');
+    fprintf(fid, '- Sets: training, validation\n');
+    fprintf(fid, '- Total combinations: 6 folders\n\n');
     
     fprintf(fid, 'CONVERSION STATISTICS:\n');
     fprintf(fid, 'Total ECG files processed: %d\n', total_processed);
@@ -263,8 +297,8 @@ function generate_lead2_conversion_report(output_path, total_processed, total_co
     fprintf(fid, '- TR09173_age67_Lead2_4sec.png\n');
     
     fprintf(fid, '\nDIRECTORY STRUCTURE:\n');
-    fprintf(fid, 'training/[SB|AFIB|GSVT|SR]/[lead2_scalogram_images]\n');
-    fprintf(fid, 'validation/[SB|AFIB|GSVT|SR]/[lead2_scalogram_images]\n');
+    fprintf(fid, 'training/[AFIB|SB|SR]/[lead2_scalogram_images]\n');
+    fprintf(fid, 'validation/[AFIB|SB|SR]/[lead2_scalogram_images]\n');
     
     fprintf(fid, '\nERROR ANALYSIS:\n');
     if conversion_errors > 0
@@ -287,10 +321,10 @@ function analyze_lead2_dataset()
     
     dataset_path = 'C:\Users\henry\Downloads\ECG-Dx\Lead2_Scalogram_Dataset';
     
-    fprintf('=== LEAD II SCALOGRAM DATASET ANALYSIS ===\n');
+    fprintf('\n=== LEAD II SCALOGRAM DATASET ANALYSIS ===\n');
     
     datasets = {'training', 'validation'};
-    groups = {'SB', 'AFIB', 'GSVT', 'SR'};
+    groups = {'AFIB', 'SB', 'SR'};
     
     total_images = 0;
     group_counts = struct();
@@ -345,8 +379,15 @@ function analyze_lead2_dataset()
             validation_total = validation_total + val_count;
         end
         
-        fprintf('%s: Training=%d, Validation=%d, Total=%d\n', ...
-                group_name, train_count, val_count, train_count + val_count);
+        total_group = train_count + val_count;
+        if total_group > 0
+            train_pct = (train_count / total_group) * 100;
+            val_pct = (val_count / total_group) * 100;
+            fprintf('%s: Training=%d (%.1f%%), Validation=%d (%.1f%%), Total=%d\n', ...
+                    group_name, train_count, train_pct, val_count, val_pct, total_group);
+        else
+            fprintf('%s: No data found\n', group_name);
+        end
     end
     
     fprintf('\nOverall: Training=%d, Validation=%d\n', training_total, validation_total);
@@ -356,5 +397,6 @@ function analyze_lead2_dataset()
     end
 end
 
-% Run the conversion
+% Main execution
+fprintf('Starting ECG Lead II to Scalogram conversion...\n');
 convert_ecg_lead2_to_scalograms();
