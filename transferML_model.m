@@ -1,883 +1,352 @@
-%Training and validation using Alexnet
-DatasetPath = 'C:\Users\henry\Downloads\ECG-Dx\Lead2_Scalogram_Dataset';
+%% Enhanced Training and Validation using AlexNet with Comprehensive Analysis
+% Dataset: Lead II Scalogram Images (227x227 pixels)
+% Classes: SR (Sinus Rhythm), SB (Sinus Bradycardia), AFIB (Atrial Fibrillation)
 
-%Reading Images from Image Database Folder
-images = imageDatastore(DatasetPath, "IncludeSubfolders",true,"LabelSource","foldernames");
+clear; clc; close all;
+
+%% Setup and Data Loading
+DatasetPath = 'C:\Users\henry\Downloads\ECG-Dx\Lead2_Scalogram_Dataset';
+ResultsPath = 'C:\Users\henry\Downloads\ECG-Dx\Training_Results';
+
+% Create results directory if it doesn't exist
+if ~exist(ResultsPath, 'dir')
+    mkdir(ResultsPath);
+end
+
+% Reading Images from Image Database Folder
+fprintf('Loading dataset from: %s\n', DatasetPath);
+images = imageDatastore(DatasetPath, "IncludeSubfolders", true, "LabelSource", "foldernames");
+
+% Display dataset information
+fprintf('Total images: %d\n', numel(images.Files));
+labelCounts = countEachLabel(images);
+disp('Class distribution:');
+disp(labelCounts);
 
 % Split the data into training and validation sets
 numTrainFiles = 6476;
 [TrainImages, TestImages] = splitEachLabel(images, numTrainFiles, 'randomized');
 
-net = alexnet; %importing pretrained Alexnet
-layersTransfer = net.Layers(1:end-3); %Preserves all layers except the last three layers (full connected layer, softmax layer, classification layer)
+fprintf('Training images: %d\n', numel(TrainImages.Files));
+fprintf('Validation images: %d\n', numel(TestImages.Files));
 
-numClasses = 3; %Number of output classes: SR, SB, AFIB
+%% Network Architecture Setup
+net = alexnet; % Import pretrained AlexNet
+layersTransfer = net.Layers(1:end-3); % Preserve all layers except the last three
+numClasses = 3; % Number of output classes: SR, SB, AFIB
 
-%Defining layers of Alexnet
+% Define layers of AlexNet
 layers = [
     layersTransfer
-    fullyConnectedLayer(numClasses, "WeightLearnRateFactor", 20, "BiasLearnRateFactor",20)
+    fullyConnectedLayer(numClasses, "WeightLearnRateFactor", 20, "BiasLearnRateFactor", 20)
     softmaxLayer
-    classificationLayer];
+    classificationLayer
+];
 
-%Training Options
-options = trainingOptions("sgdm","MiniBatchSize",16,"MaxEpochs", 15,"InitialLearnRate",1e-4,"Shuffle","every-epoch", "ValidationData",TestImages,"ValidationFrequency",10, "Verbose",false,"Plots","training-progress");
+%% Training Options
+options = trainingOptions("sgdm", ...
+    "MiniBatchSize", 32, ...
+    "MaxEpochs", 8, ...
+    "InitialLearnRate", 1e-4, ...
+    "Shuffle", "every-epoch", ...
+    "ValidationData", TestImages, ...
+    "ValidationFrequency", 20, ...
+    "Verbose", false, ...
+    "Plots", "training-progress", ...
+    "OutputNetwork", "last-iteration");
 
-%Training AlexNet
-netTransfer = trainNetwork(TrainImages, layers, options);
+%% Training AlexNet
+fprintf('\nStarting training...\n');
+tic;
+[netTransfer, trainInfo] = trainNetwork(TrainImages, layers, options);
+trainingTime = toc;
+fprintf('Training completed in %.2f seconds (%.2f minutes)\n', trainingTime, trainingTime/60);
 
-%Classifying Images
-Ypred = classify(netTransfer,TestImages);
+%% Save the Trained Model
+modelSavePath = fullfile(ResultsPath, 'trained_alexnet_model.mat');
+save(modelSavePath, 'netTransfer', 'trainInfo', 'trainingTime');
+fprintf('Model saved to: %s\n', modelSavePath);
+
+%% Model Evaluation - Get Predictions and Scores
+fprintf('\nEvaluating model performance...\n');
+
+% Get prediction scores for ROC analysis
+[Ypred, scores] = classify(netTransfer, TestImages);
 Yvalidation = TestImages.Labels;
-accuracy = sum(Ypred==Yvalidation)/numel(Yvalidation);
+
+% Calculate overall accuracy
+accuracy = sum(Ypred == Yvalidation) / numel(Yvalidation);
+fprintf('Overall Accuracy: %.4f (%.2f%%)\n', accuracy, accuracy * 100);
 
 %Plotting Confusion Matrix
-plotconfusion(Yvalidation,Ypred);%% Comprehensive ECG Classification Analysis using AlexNet Transfer Learning
-% This script performs complete analysis across three datasets:
-% 1. Training dataset for model development
-% 2. Age-balanced dataset for age-stratified performance analysis
-% 3. Noise dataset for robustness evaluation across SNR levels
+plotconfusion(Yvalidation,Ypred);
 
-clear; clc; close all;
+%% Detailed Performance Metrics
+classes = categories(Yvalidation);
+numClasses = length(classes);
 
-%% Setup and Configuration
-fprintf('=== ECG Classification Analysis with AlexNet ===\n');
-fprintf('Starting comprehensive analysis...\n\n');
+% Initialize metrics arrays
+precision = zeros(numClasses, 1);
+recall = zeros(numClasses, 1);
+f1Score = zeros(numClasses, 1);
+specificity = zeros(numClasses, 1);
 
-% Dataset paths
-TRAINING_DATASET_PATH = 'C:\Users\henry\Downloads\ECG-Dx\Lead2_Scalogram_Dataset';
-AGE_BALANCED_DATASET_PATH = 'C:\Users\henry\Downloads\ECG-Dx\Age_Balanced_Lead2_Scalogram_Dataset';
-NOISE_DATASET_PATH = 'C:\Users\henry\Downloads\ECG-Dx\Focused_Combined_Scalogram_Dataset';
+% Calculate confusion matrix
+confMat = confusionmat(Yvalidation, Ypred);
 
-% Results directory
-RESULTS_DIR = 'C:\Users\henry\Downloads\ECG-Dx\Analysis_Results';
-if ~exist(RESULTS_DIR, 'dir')
-    mkdir(RESULTS_DIR);
+% Calculate metrics for each class
+for i = 1:numClasses
+    TP = confMat(i, i);
+    FP = sum(confMat(:, i)) - TP;
+    FN = sum(confMat(i, :)) - TP;
+    TN = sum(confMat(:)) - TP - FP - FN;
+    
+    precision(i) = TP / (TP + FP);
+    recall(i) = TP / (TP + FN);
+    f1Score(i) = 2 * (precision(i) * recall(i)) / (precision(i) + recall(i));
+    specificity(i) = TN / (TN + FP);
 end
 
-% Age group definitions
-AGE_GROUPS = {'young_adult', 'middle_aged', 'elderly'};
-AGE_GROUP_LABELS = {'Young Adults (18-40)', 'Middle Aged (41-65)', 'Elderly (66+)'};
-CLASSES = {'SR', 'SB', 'AFIB'};
-CLASS_LABELS = {'Sinus Rhythm', 'Sinus Bradycardia', 'Atrial Fibrillation'};
+% Handle NaN values (in case of division by zero)
+precision(isnan(precision)) = 0;
+recall(isnan(recall)) = 0;
+f1Score(isnan(f1Score)) = 0;
+specificity(isnan(specificity)) = 0;
 
-% Training parameters
-BATCH_SIZE = 16;
-MAX_EPOCHS = 15;
-INITIAL_LEARN_RATE = 1e-4;
+%% Display Detailed Results
+fprintf('\n=== DETAILED PERFORMANCE METRICS ===\n');
+fprintf('%-8s %-10s %-10s %-10s %-10s\n', 'Class', 'Precision', 'Recall', 'F1-Score', 'Specificity');
+fprintf('%-8s %-10s %-10s %-10s %-10s\n', '-----', '---------', '------', '--------', '-----------');
 
-%% Phase 1: Model Training on Primary Dataset
-fprintf('Phase 1: Training AlexNet on primary dataset...\n');
-
-try
-    % Load training dataset
-    fprintf('Loading primary training dataset from: %s\n', TRAINING_DATASET_PATH);
-    images = imageDatastore(TRAINING_DATASET_PATH, "IncludeSubfolders", true, "LabelSource", "foldernames");
-    
-    % Display dataset statistics
-    labelCounts = countEachLabel(images);
-    fprintf('Dataset loaded successfully:\n');
-    disp(labelCounts);
-    
-    % Split data using the specified counts
-    numTrainFiles = 6476;
-    [TrainImages, TestImages] = splitEachLabel(images, numTrainFiles, 'randomized');
-    
-    fprintf('Training samples: %d, Validation samples: %d\n', ...
-            numel(TrainImages.Files), numel(TestImages.Files));
-    
-    % Setup AlexNet transfer learning
-    net = alexnet;
-    layersTransfer = net.Layers(1:end-3);
-    numClasses = 3;
-    
-    layers = [
-        layersTransfer
-        fullyConnectedLayer(numClasses, "WeightLearnRateFactor", 20, "BiasLearnRateFactor", 20)
-        softmaxLayer
-        classificationLayer];
-    
-    % Training options with validation monitoring
-    options = trainingOptions("sgdm", ...
-        "MiniBatchSize", BATCH_SIZE, ...
-        "MaxEpochs", MAX_EPOCHS, ...
-        "InitialLearnRate", INITIAL_LEARN_RATE, ...
-        "Shuffle", "every-epoch", ...
-        "ValidationData", TestImages, ...
-        "ValidationFrequency", 10, ...
-        "Verbose", false, ...
-        "Plots", "training-progress", ...
-        "OutputFcn", @(info)saveTrainingProgress(info, RESULTS_DIR));
-    
-    % Train the network
-    fprintf('Starting training for %d epochs...\n', MAX_EPOCHS);
-    tic;
-    netTransfer = trainNetwork(TrainImages, layers, options);
-    trainingTime = toc;
-    fprintf('Training completed in %.2f minutes\n', trainingTime/60);
-    
-    % Save the trained model
-    modelPath = fullfile(RESULTS_DIR, 'trained_alexnet_model.mat');
-    save(modelPath, 'netTransfer', 'trainingTime', 'options');
-    fprintf('Model saved to: %s\n', modelPath);
-    
-    % Evaluate on validation set
-    fprintf('Evaluating on validation set...\n');
-    Ypred = classify(netTransfer, TestImages);
-    Yvalidation = TestImages.Labels;
-    primary_accuracy = sum(Ypred == Yvalidation) / numel(Yvalidation);
-    
-    fprintf('Primary dataset validation accuracy: %.2f%%\n', primary_accuracy * 100);
-    
-    % Generate primary dataset report
-    generatePrimaryDatasetReport(netTransfer, TestImages, Ypred, Yvalidation, ...
-                               primary_accuracy, trainingTime, RESULTS_DIR, CLASSES, CLASS_LABELS);
-    
-catch ME
-    fprintf('Error in Phase 1: %s\n', ME.message);
-    return;
+for i = 1:numClasses
+    fprintf('%-8s %-10.4f %-10.4f %-10.4f %-10.4f\n', ...
+        string(classes{i}), precision(i), recall(i), f1Score(i), specificity(i));
 end
 
-%% Phase 2: Age-Stratified Analysis on Age-Balanced Dataset
-fprintf('\nPhase 2: Age-stratified analysis on age-balanced dataset...\n');
+% Calculate macro and weighted averages
+macroPrecision = mean(precision);
+macroRecall = mean(recall);
+macroF1 = mean(f1Score);
+macroSpecificity = mean(specificity);
 
-try
-    % Load age-balanced dataset
-    fprintf('Loading age-balanced dataset from: %s\n', AGE_BALANCED_DATASET_PATH);
-    age_balanced_images = imageDatastore(AGE_BALANCED_DATASET_PATH, "IncludeSubfolders", true, "LabelSource", "foldernames");
-    
-    % Analyze age-balanced dataset structure
-    age_results = analyzeAgeBalancedDataset(netTransfer, age_balanced_images, AGE_GROUPS, CLASSES);
-    
-    % Generate age-stratified analysis report
-    generateAgeStratifiedReport(age_results, RESULTS_DIR, AGE_GROUPS, AGE_GROUP_LABELS, CLASSES, CLASS_LABELS);
-    
-    fprintf('Age-stratified analysis completed.\n');
-    
-catch ME
-    fprintf('Error in Phase 2: %s\n', ME.message);
-end
+% Class weights for weighted average
+classWeights = sum(confMat, 2) / sum(confMat(:));
+weightedPrecision = sum(precision .* classWeights);
+weightedRecall = sum(recall .* classWeights);
+weightedF1 = sum(f1Score .* classWeights);
+weightedSpecificity = sum(specificity .* classWeights);
 
-%% Phase 3: Noise Robustness Analysis
-fprintf('\nPhase 3: Noise robustness analysis across SNR levels...\n');
+fprintf('\n%-8s %-10.4f %-10.4f %-10.4f %-10.4f\n', 'Macro', macroPrecision, macroRecall, macroF1, macroSpecificity);
+fprintf('%-8s %-10.4f %-10.4f %-10.4f %-10.4f\n', 'Weighted', weightedPrecision, weightedRecall, weightedF1, weightedSpecificity);
 
-try
-    % SNR levels to analyze
-    SNR_LEVELS = {'25dB', '20dB', '15dB'};
-    
-    % Analyze each SNR level
-    noise_results = analyzeNoiseDataset(netTransfer, NOISE_DATASET_PATH, SNR_LEVELS, AGE_GROUPS, CLASSES);
-    
-    % Generate noise robustness report
-    generateNoiseRobustnessReport(noise_results, RESULTS_DIR, SNR_LEVELS, AGE_GROUPS, AGE_GROUP_LABELS, CLASSES, CLASS_LABELS);
-    
-    fprintf('Noise robustness analysis completed.\n');
-    
-catch ME
-    fprintf('Error in Phase 3: %s\n', ME.message);
-end
+%% Enhanced Confusion Matrix
+figure('Position', [100, 100, 800, 600]);
+confusionchart(Yvalidation, Ypred, 'Title', 'Confusion Matrix - ECG Classification', ...
+    'RowSummary', 'row-normalized', 'ColumnSummary', 'column-normalized');
+saveas(gcf, fullfile(ResultsPath, 'confusion_matrix.png'));
+saveas(gcf, fullfile(ResultsPath, 'confusion_matrix.fig'));
 
-%% Generate Comprehensive Summary Report
-fprintf('\nGenerating comprehensive summary report...\n');
-try
-    generateComprehensiveSummaryReport(primary_accuracy, age_results, noise_results, ...
-                                     RESULTS_DIR, AGE_GROUPS, AGE_GROUP_LABELS, CLASSES, CLASS_LABELS, SNR_LEVELS);
-    fprintf('Comprehensive analysis completed successfully!\n');
-    fprintf('All results saved to: %s\n', RESULTS_DIR);
-catch ME
-    fprintf('Error generating summary: %s\n', ME.message);
-end
+%% ROC Curves
+figure('Position', [200, 100, 1200, 400]);
 
-%% Helper Functions
+% Convert labels to numeric for ROC calculation
+[~, ~, Yvalidation_numeric] = unique(Yvalidation);
+auc_scores = zeros(numClasses, 1);
 
-function stop = saveTrainingProgress(info, resultsDir)
-    % Save training progress data
-    stop = false;
-    if info.State == "done"
-        trainingInfo = info;
-        save(fullfile(resultsDir, 'training_info.mat'), 'trainingInfo');
-    end
-end
-
-function generatePrimaryDatasetReport(netTransfer, TestImages, Ypred, Yvalidation, accuracy, trainingTime, resultsDir, classes, classLabels)
-    % Generate comprehensive report for primary dataset
+for i = 1:numClasses
+    subplot(1, numClasses, i);
     
-    fprintf('Generating primary dataset report...\n');
+    % Create binary labels (one-vs-rest)
+    binaryLabels = (Yvalidation_numeric == i);
+    classScores = scores(:, i);
     
-    % Calculate detailed metrics
-    [precision, recall, f1_scores, confMat] = calculateDetailedMetrics(Yvalidation, Ypred, classes);
+    % Calculate ROC
+    [X, Y, T, AUC] = perfcurve(binaryLabels, classScores, 1);
+    auc_scores(i) = AUC;
     
-    % Create figures with white background
-    set(0, 'DefaultFigureColor', 'white');
-    set(0, 'DefaultAxesColor', 'white');
-    
-    % 1. Confusion Matrix
-    fig1 = figure('Position', [100, 100, 800, 600]);
-    confusionchart(Yvalidation, Ypred, 'Title', 'Confusion Matrix - Primary Dataset', ...
-                  'RowSummary', 'row-normalized', 'ColumnSummary', 'column-normalized');
-    saveas(fig1, fullfile(resultsDir, 'primary_confusion_matrix.png'));
-    saveas(fig1, fullfile(resultsDir, 'primary_confusion_matrix.fig'));
-    
-    % 2. Performance Metrics Bar Chart
-    fig2 = figure('Position', [100, 100, 1000, 600]);
-    metrics_data = [precision; recall; f1_scores];
-    b = bar(metrics_data', 'grouped');
-    b(1).DisplayName = 'Precision';
-    b(2).DisplayName = 'Recall';
-    b(3).DisplayName = 'F1-Score';
-    set(gca, 'XTickLabel', classLabels);
-    ylabel('Score');
-    title('Performance Metrics by Class - Primary Dataset');
-    legend('Location', 'best');
-    grid on;
-    ylim([0, 1]);
-    saveas(fig2, fullfile(resultsDir, 'primary_metrics_by_class.png'));
-    saveas(fig2, fullfile(resultsDir, 'primary_metrics_by_class.fig'));
-    
-    % 3. Training History (if available)
-    try
-        load(fullfile(resultsDir, 'training_info.mat'));
-        fig3 = figure('Position', [100, 100, 1200, 500]);
-        
-        subplot(1, 2, 1);
-        plot(trainingInfo.TrainingLoss, 'b-', 'LineWidth', 2);
-        hold on;
-        plot(trainingInfo.ValidationLoss, 'r-', 'LineWidth', 2);
-        xlabel('Iteration');
-        ylabel('Loss');
-        title('Training and Validation Loss');
-        legend('Training', 'Validation');
-        grid on;
-        
-        subplot(1, 2, 2);
-        plot(trainingInfo.TrainingAccuracy, 'b-', 'LineWidth', 2);
-        hold on;
-        plot(trainingInfo.ValidationAccuracy, 'r-', 'LineWidth', 2);
-        xlabel('Iteration');
-        ylabel('Accuracy');
-        title('Training and Validation Accuracy');
-        legend('Training', 'Validation');
-        grid on;
-        
-        saveas(fig3, fullfile(resultsDir, 'training_history.png'));
-        saveas(fig3, fullfile(resultsDir, 'training_history.fig'));
-    catch
-        fprintf('Training history plot not available.\n');
-    end
-    
-    % Save detailed results
-    results = struct();
-    results.accuracy = accuracy;
-    results.precision = precision;
-    results.recall = recall;
-    results.f1_scores = f1_scores;
-    results.confusion_matrix = confMat;
-    results.training_time_minutes = trainingTime / 60;
-    results.classes = classes;
-    results.class_labels = classLabels;
-    
-    save(fullfile(resultsDir, 'primary_dataset_results.mat'), 'results');
-    
-    % Generate text report
-    reportFile = fullfile(resultsDir, 'primary_dataset_report.txt');
-    fid = fopen(reportFile, 'w');
-    fprintf(fid, 'ECG Classification - Primary Dataset Results\n');
-    fprintf(fid, '==========================================\n\n');
-    fprintf(fid, 'Model: AlexNet Transfer Learning\n');
-    fprintf(fid, 'Training Time: %.2f minutes\n', trainingTime/60);
-    fprintf(fid, 'Overall Accuracy: %.4f (%.2f%%)\n\n', accuracy, accuracy*100);
-    
-    fprintf(fid, 'Performance by Class:\n');
-    fprintf(fid, '%-20s %-10s %-10s %-10s\n', 'Class', 'Precision', 'Recall', 'F1-Score');
-    fprintf(fid, '%-20s %-10s %-10s %-10s\n', '-----', '---------', '------', '--------');
-    for i = 1:length(classes)
-        fprintf(fid, '%-20s %-10.4f %-10.4f %-10.4f\n', classLabels{i}, precision(i), recall(i), f1_scores(i));
-    end
-    
-    fclose(fid);
-    close(fig1); close(fig2);
-    if exist('fig3', 'var'), close(fig3); end
-end
-
-function age_results = analyzeAgeBalancedDataset(netTransfer, age_balanced_images, ageGroups, classes)
-    % Analyze performance across age groups
-    
-    fprintf('Analyzing age-balanced dataset...\n');
-    
-    age_results = struct();
-    
-    % Extract age group information from filenames
-    filenames = age_balanced_images.Files;
-    labels = age_balanced_images.Labels;
-    
-    % Initialize results structure
-    for i = 1:length(ageGroups)
-        for j = 1:length(classes)
-            age_results.(ageGroups{i}).(classes{j}) = struct();
-        end
-    end
-    
-    % Process each age group
-    for ageIdx = 1:length(ageGroups)
-        ageGroup = ageGroups{ageIdx};
-        fprintf('Processing %s age group...\n', ageGroup);
-        
-        % Find files for this age group
-        ageGroupMask = contains(filenames, ['_' ageGroup]);
-        ageGroupFiles = filenames(ageGroupMask);
-        ageGroupLabels = labels(ageGroupMask);
-        
-        if isempty(ageGroupFiles)
-            fprintf('Warning: No files found for age group %s\n', ageGroup);
-            continue;
-        end
-        
-        % Create datastore for this age group
-        ageGroupDatastore = imageDatastore(ageGroupFiles);
-        ageGroupDatastore.Labels = ageGroupLabels;
-        
-        % Predict on this age group
-        Ypred_age = classify(netTransfer, ageGroupDatastore);
-        
-        % Calculate overall metrics for this age group
-        accuracy_age = sum(Ypred_age == ageGroupLabels) / numel(ageGroupLabels);
-        [precision_age, recall_age, f1_age, confMat_age] = calculateDetailedMetrics(ageGroupLabels, Ypred_age, classes);
-        
-        % Store results
-        age_results.(ageGroup).overall_accuracy = accuracy_age;
-        age_results.(ageGroup).precision = precision_age;
-        age_results.(ageGroup).recall = recall_age;
-        age_results.(ageGroup).f1_scores = f1_age;
-        age_results.(ageGroup).confusion_matrix = confMat_age;
-        age_results.(ageGroup).true_labels = ageGroupLabels;
-        age_results.(ageGroup).predicted_labels = Ypred_age;
-        
-        fprintf('Age group %s: Accuracy = %.4f, Mean F1 = %.4f\n', ...
-                ageGroup, accuracy_age, mean(f1_age));
-    end
-end
-
-function noise_results = analyzeNoiseDataset(netTransfer, noiseDatasetPath, snrLevels, ageGroups, classes)
-    % Analyze performance across SNR levels and age groups
-    
-    fprintf('Analyzing noise dataset across SNR levels...\n');
-    
-    noise_results = struct();
-    
-    % Process each SNR level
-    for snrIdx = 1:length(snrLevels)
-        snrLevel = snrLevels{snrIdx};
-        fprintf('Processing SNR %s...\n', snrLevel);
-        
-        snrPath = fullfile(noiseDatasetPath, ['SNR_' snrLevel]);
-        
-        if ~exist(snrPath, 'dir')
-            fprintf('Warning: SNR directory not found: %s\n', snrPath);
-            continue;
-        end
-        
-        % Load dataset for this SNR level
-        snrDatastore = imageDatastore(snrPath, "IncludeSubfolders", true, "LabelSource", "foldernames");
-        
-        % Initialize SNR results
-        noise_results.(snrLevel) = struct();
-        
-        % Analyze each age group within this SNR level
-        for ageIdx = 1:length(ageGroups)
-            ageGroup = ageGroups{ageIdx};
-            
-            % Find files for this age group and SNR level
-            filenames = snrDatastore.Files;
-            labels = snrDatastore.Labels;
-            
-            ageGroupMask = contains(filenames, ['_' ageGroup]);
-            ageGroupFiles = filenames(ageGroupMask);
-            ageGroupLabels = labels(ageGroupMask);
-            
-            if isempty(ageGroupFiles)
-                fprintf('Warning: No files found for age group %s at SNR %s\n', ageGroup, snrLevel);
-                continue;
-            end
-            
-            % Create datastore for this age group and SNR
-            ageSnrDatastore = imageDatastore(ageGroupFiles);
-            ageSnrDatastore.Labels = ageGroupLabels;
-            
-            % Predict
-            Ypred_age_snr = classify(netTransfer, ageSnrDatastore);
-            
-            % Calculate metrics
-            accuracy_age_snr = sum(Ypred_age_snr == ageGroupLabels) / numel(ageGroupLabels);
-            [precision_age_snr, recall_age_snr, f1_age_snr, confMat_age_snr] = ...
-                calculateDetailedMetrics(ageGroupLabels, Ypred_age_snr, classes);
-            
-            % Store results
-            noise_results.(snrLevel).(ageGroup).accuracy = accuracy_age_snr;
-            noise_results.(snrLevel).(ageGroup).precision = precision_age_snr;
-            noise_results.(snrLevel).(ageGroup).recall = recall_age_snr;
-            noise_results.(snrLevel).(ageGroup).f1_scores = f1_age_snr;
-            noise_results.(snrLevel).(ageGroup).confusion_matrix = confMat_age_snr;
-            
-            fprintf('SNR %s, Age %s: Accuracy = %.4f, Mean F1 = %.4f\n', ...
-                    snrLevel, ageGroup, accuracy_age_snr, mean(f1_age_snr));
-        end
-        
-        % Calculate overall metrics for this SNR level
-        allFiles = snrDatastore.Files;
-        allLabels = snrDatastore.Labels;
-        allDatastore = imageDatastore(allFiles);
-        allDatastore.Labels = allLabels;
-        
-        Ypred_snr = classify(netTransfer, allDatastore);
-        accuracy_snr = sum(Ypred_snr == allLabels) / numel(allLabels);
-        [precision_snr, recall_snr, f1_snr, confMat_snr] = calculateDetailedMetrics(allLabels, Ypred_snr, classes);
-        
-        noise_results.(snrLevel).overall_accuracy = accuracy_snr;
-        noise_results.(snrLevel).overall_precision = precision_snr;
-        noise_results.(snrLevel).overall_recall = recall_snr;
-        noise_results.(snrLevel).overall_f1_scores = f1_snr;
-        noise_results.(snrLevel).overall_confusion_matrix = confMat_snr;
-    end
-end
-
-function generateAgeStratifiedReport(age_results, resultsDir, ageGroups, ageGroupLabels, classes, classLabels)
-    % Generate comprehensive age-stratified analysis report
-    
-    fprintf('Generating age-stratified analysis report...\n');
-    
-    % Set figure defaults
-    set(0, 'DefaultFigureColor', 'white');
-    set(0, 'DefaultAxesColor', 'white');
-    
-    % 1. Age Group Performance Comparison
-    fig1 = figure('Position', [100, 100, 1200, 800]);
-    
-    % Extract data for plotting
-    accuracies = zeros(1, length(ageGroups));
-    mean_f1_scores = zeros(1, length(ageGroups));
-    f1_by_class = zeros(length(classes), length(ageGroups));
-    
-    for i = 1:length(ageGroups)
-        ageGroup = ageGroups{i};
-        if isfield(age_results, ageGroup)
-            accuracies(i) = age_results.(ageGroup).overall_accuracy;
-            mean_f1_scores(i) = mean(age_results.(ageGroup).f1_scores);
-            f1_by_class(:, i) = age_results.(ageGroup).f1_scores;
-        end
-    end
-    
-    % Subplot 1: Overall Accuracy by Age Group
-    subplot(2, 2, 1);
-    bar(1:length(ageGroups), accuracies, 'FaceColor', [0.3, 0.6, 0.9]);
-    set(gca, 'XTickLabel', ageGroupLabels);
-    ylabel('Accuracy');
-    title('Overall Accuracy by Age Group');
-    grid on;
-    ylim([0, 1]);
-    
-    % Subplot 2: Mean F1-Score by Age Group
-    subplot(2, 2, 2);
-    bar(1:length(ageGroups), mean_f1_scores, 'FaceColor', [0.9, 0.6, 0.3]);
-    set(gca, 'XTickLabel', ageGroupLabels);
-    ylabel('Mean F1-Score');
-    title('Mean F1-Score by Age Group');
-    grid on;
-    ylim([0, 1]);
-    
-    % Subplot 3: F1-Score by Class and Age Group
-    subplot(2, 2, [3, 4]);
-    b = bar(f1_by_class', 'grouped');
-    set(gca, 'XTickLabel', ageGroupLabels);
-    ylabel('F1-Score');
-    title('F1-Score by Class and Age Group');
-    legend(classLabels, 'Location', 'best');
-    grid on;
-    ylim([0, 1]);
-    
-    saveas(fig1, fullfile(resultsDir, 'age_stratified_performance.png'));
-    saveas(fig1, fullfile(resultsDir, 'age_stratified_performance.fig'));
-    
-    % 2. Confusion Matrices for Each Age Group
-    fig2 = figure('Position', [100, 100, 1500, 500]);
-    for i = 1:length(ageGroups)
-        ageGroup = ageGroups{i};
-        if isfield(age_results, ageGroup)
-            subplot(1, length(ageGroups), i);
-            confusionchart(age_results.(ageGroup).true_labels, age_results.(ageGroup).predicted_labels, ...
-                          'Title', ['Confusion Matrix - ' ageGroupLabels{i}]);
-        end
-    end
-    saveas(fig2, fullfile(resultsDir, 'age_stratified_confusion_matrices.png'));
-    saveas(fig2, fullfile(resultsDir, 'age_stratified_confusion_matrices.fig'));
-    
-    % Save results
-    save(fullfile(resultsDir, 'age_stratified_results.mat'), 'age_results');
-    
-    % Generate text report
-    reportFile = fullfile(resultsDir, 'age_stratified_report.txt');
-    fid = fopen(reportFile, 'w');
-    fprintf(fid, 'ECG Classification - Age-Stratified Analysis\n');
-    fprintf(fid, '===========================================\n\n');
-    
-    for i = 1:length(ageGroups)
-        ageGroup = ageGroups{i};
-        if isfield(age_results, ageGroup)
-            fprintf(fid, '%s:\n', ageGroupLabels{i});
-            fprintf(fid, '  Overall Accuracy: %.4f (%.2f%%)\n', ...
-                    age_results.(ageGroup).overall_accuracy, age_results.(ageGroup).overall_accuracy*100);
-            fprintf(fid, '  Performance by Class:\n');
-            fprintf(fid, '  %-20s %-10s %-10s %-10s\n', 'Class', 'Precision', 'Recall', 'F1-Score');
-            fprintf(fid, '  %-20s %-10s %-10s %-10s\n', '-----', '---------', '------', '--------');
-            for j = 1:length(classes)
-                fprintf(fid, '  %-20s %-10.4f %-10.4f %-10.4f\n', classLabels{j}, ...
-                        age_results.(ageGroup).precision(j), age_results.(ageGroup).recall(j), ...
-                        age_results.(ageGroup).f1_scores(j));
-            end
-            fprintf(fid, '\n');
-        end
-    end
-    
-    fclose(fid);
-    close(fig1); close(fig2);
-end
-
-function generateNoiseRobustnessReport(noise_results, resultsDir, snrLevels, ageGroups, ageGroupLabels, classes, classLabels)
-    % Generate comprehensive noise robustness analysis report
-    
-    fprintf('Generating noise robustness analysis report...\n');
-    
-    % Set figure defaults
-    set(0, 'DefaultFigureColor', 'white');
-    set(0, 'DefaultAxesColor', 'white');
-    
-    % 1. Performance vs SNR Level
-    fig1 = figure('Position', [100, 100, 1400, 1000]);
-    
-    % Extract data for plotting
-    snr_values = zeros(1, length(snrLevels));
-    overall_accuracies = zeros(1, length(snrLevels));
-    age_accuracies = zeros(length(ageGroups), length(snrLevels));
-    class_f1_scores = zeros(length(classes), length(snrLevels));
-    
-    for i = 1:length(snrLevels)
-        snrLevel = snrLevels{i};
-        snr_values(i) = str2double(snrLevel(1:2)); % Extract numeric value
-        
-        if isfield(noise_results, snrLevel)
-            overall_accuracies(i) = noise_results.(snrLevel).overall_accuracy;
-            class_f1_scores(:, i) = noise_results.(snrLevel).overall_f1_scores;
-            
-            for j = 1:length(ageGroups)
-                ageGroup = ageGroups{j};
-                if isfield(noise_results.(snrLevel), ageGroup)
-                    age_accuracies(j, i) = noise_results.(snrLevel).(ageGroup).accuracy;
-                end
-            end
-        end
-    end
-    
-    % Subplot 1: Overall Accuracy vs SNR
-    subplot(2, 3, 1);
-    plot(snr_values, overall_accuracies, 'o-', 'LineWidth', 2, 'MarkerSize', 8);
-    xlabel('SNR (dB)');
-    ylabel('Overall Accuracy');
-    title('Overall Accuracy vs SNR Level');
+    % Plot ROC curve
+    plot(X, Y, 'LineWidth', 2);
+    xlabel('False Positive Rate');
+    ylabel('True Positive Rate');
+    title(sprintf('ROC Curve - %s (AUC = %.4f)', string(classes{i}), AUC));
     grid on;
     
-    % Subplot 2: Accuracy vs SNR by Age Group
-    subplot(2, 3, 2);
-    colors = lines(length(ageGroups));
+    % Add diagonal line
     hold on;
-    for j = 1:length(ageGroups)
-        plot(snr_values, age_accuracies(j, :), 'o-', 'LineWidth', 2, 'MarkerSize', 6, ...
-             'Color', colors(j, :), 'DisplayName', ageGroupLabels{j});
+    plot([0, 1], [0, 1], 'k--', 'LineWidth', 1);
+    legend('ROC Curve', 'Random Classifier', 'Location', 'southeast');
+    hold off;
+end
+
+sgtitle('ROC Curves for All Classes');
+saveas(gcf, fullfile(ResultsPath, 'roc_curves.png'));
+saveas(gcf, fullfile(ResultsPath, 'roc_curves.fig'));
+
+%% Training Progress Visualization
+if isfield(trainInfo, 'TrainingLoss')
+    figure('Position', [300, 100, 1200, 500]);
+    
+    % Training and Validation Loss
+    subplot(1, 2, 1);
+    plot(trainInfo.TrainingLoss, 'b-', 'LineWidth', 2, 'DisplayName', 'Training Loss');
+    hold on;
+    if isfield(trainInfo, 'ValidationLoss')
+        plot(trainInfo.ValidationLoss, 'r-', 'LineWidth', 2, 'DisplayName', 'Validation Loss');
     end
-    xlabel('SNR (dB)');
-    ylabel('Accuracy');
-    title('Accuracy vs SNR by Age Group');
+    xlabel('Iteration');
+    ylabel('Loss');
+    title('Training and Validation Loss');
     legend('Location', 'best');
     grid on;
     hold off;
     
-    % Subplot 3: F1-Score vs SNR by Class
-    subplot(2, 3, 3);
-    colors = lines(length(classes));
+    % Training and Validation Accuracy
+    subplot(1, 2, 2);
+    plot(trainInfo.TrainingAccuracy, 'b-', 'LineWidth', 2, 'DisplayName', 'Training Accuracy');
     hold on;
-    for j = 1:length(classes)
-        plot(snr_values, class_f1_scores(j, :), 'o-', 'LineWidth', 2, 'MarkerSize', 6, ...
-             'Color', colors(j, :), 'DisplayName', classLabels{j});
+    if isfield(trainInfo, 'ValidationAccuracy')
+        plot(trainInfo.ValidationAccuracy, 'r-', 'LineWidth', 2, 'DisplayName', 'Validation Accuracy');
     end
-    xlabel('SNR (dB)');
-    ylabel('F1-Score');
-    title('F1-Score vs SNR by Class');
+    xlabel('Iteration');
+    ylabel('Accuracy');
+    title('Training and Validation Accuracy');
     legend('Location', 'best');
     grid on;
     hold off;
     
-    % Subplot 4: Performance degradation heatmap
-    subplot(2, 3, [4, 5, 6]);
-    heatmap_data = age_accuracies;
-    h = heatmap(snrLevels, ageGroupLabels, heatmap_data, 'Title', 'Accuracy Heatmap: Age Groups vs SNR Levels');
-    h.Colormap = parula;
-    
-    saveas(fig1, fullfile(resultsDir, 'noise_robustness_analysis.png'));
-    saveas(fig1, fullfile(resultsDir, 'noise_robustness_analysis.fig'));
-    
-    % 2. Detailed Analysis for Each SNR Level
-    fig2 = figure('Position', [100, 100, 1500, 1000]);
-    
-    for i = 1:length(snrLevels)
-        snrLevel = snrLevels{i};
-        if isfield(noise_results, snrLevel)
-            % F1-scores by age group for this SNR level
-            subplot(2, length(snrLevels), i);
-            f1_data = zeros(length(classes), length(ageGroups));
-            for j = 1:length(ageGroups)
-                ageGroup = ageGroups{j};
-                if isfield(noise_results.(snrLevel), ageGroup)
-                    f1_data(:, j) = noise_results.(snrLevel).(ageGroup).f1_scores;
-                end
-            end
-            b = bar(f1_data', 'grouped');
-            set(gca, 'XTickLabel', ageGroupLabels);
-            ylabel('F1-Score');
-            title(['F1-Scores at SNR ' snrLevel]);
-            if i == 1
-                legend(classLabels, 'Location', 'best');
-            end
-            grid on;
-            ylim([0, 1]);
-            
-            % Confusion matrix for this SNR level
-            subplot(2, length(snrLevels), i + length(snrLevels));
-            confMat = noise_results.(snrLevel).overall_confusion_matrix;
-            imagesc(confMat);
-            colormap(gca, 'Blues');
-            colorbar;
-            set(gca, 'XTick', 1:length(classes), 'XTickLabel', classes);
-            set(gca, 'YTick', 1:length(classes), 'YTickLabel', classes);
-            title(['Confusion Matrix - SNR ' snrLevel]);
-            xlabel('Predicted');
-            ylabel('Actual');
-        end
-    end
-    
-    saveas(fig2, fullfile(resultsDir, 'detailed_snr_analysis.png'));
-    saveas(fig2, fullfile(resultsDir, 'detailed_snr_analysis.fig'));
-    
-    % Save results
-    save(fullfile(resultsDir, 'noise_robustness_results.mat'), 'noise_results');
-    
-    % Generate text report
-    reportFile = fullfile(resultsDir, 'noise_robustness_report.txt');
-    fid = fopen(reportFile, 'w');
-    fprintf(fid, 'ECG Classification - Noise Robustness Analysis\n');
-    fprintf(fid, '==============================================\n\n');
-    
-    for i = 1:length(snrLevels)
-        snrLevel = snrLevels{i};
-        if isfield(noise_results, snrLevel)
-            fprintf(fid, 'SNR %s:\n', snrLevel);
-            fprintf(fid, '  Overall Accuracy: %.4f (%.2f%%)\n', ...
-                    noise_results.(snrLevel).overall_accuracy, noise_results.(snrLevel).overall_accuracy*100);
-            fprintf(fid, '  Performance by Age Group:\n');
-            for j = 1:length(ageGroups)
-                ageGroup = ageGroups{j};
-                if isfield(noise_results.(snrLevel), ageGroup)
-                    fprintf(fid, '    %s: Accuracy = %.4f, Mean F1 = %.4f\n', ...
-                            ageGroupLabels{j}, noise_results.(snrLevel).(ageGroup).accuracy, ...
-                            mean(noise_results.(snrLevel).(ageGroup).f1_scores));
-                end
-            end
-            fprintf(fid, '\n');
-        end
-    end
-    
-    fclose(fid);
-    close(fig1); close(fig2);
+    sgtitle('Training Progress');
+    saveas(gcf, fullfile(ResultsPath, 'training_progress.png'));
+    saveas(gcf, fullfile(ResultsPath, 'training_progress.fig'));
 end
 
-function generateComprehensiveSummaryReport(primary_accuracy, age_results, noise_results, resultsDir, ageGroups, ageGroupLabels, classes, classLabels, snrLevels)
-    % Generate comprehensive summary report
-    
-    fprintf('Generating comprehensive summary report...\n');
-    
-    % Set figure defaults
-    set(0, 'DefaultFigureColor', 'white');
-    set(0, 'DefaultAxesColor', 'white');
-    
-    % Create comprehensive summary figure
-    fig = figure('Position', [100, 100, 1600, 1200]);
-    
-    % Summary statistics
-    subplot(3, 3, [1, 2]);
-    summary_data = [primary_accuracy];
-    
-    % Add age-stratified accuracies
-    age_accs = zeros(1, length(ageGroups));
-    for i = 1:length(ageGroups)
-        ageGroup = ageGroups{i};
-        if isfield(age_results, ageGroup)
-            age_accs(i) = age_results.(ageGroup).overall_accuracy;
-        end
+%% Performance Summary Visualization
+figure('Position', [400, 100, 1000, 600]);
+
+% Metrics by class
+subplot(2, 2, 1);
+x = 1:numClasses;
+bar(x, [precision, recall, f1Score], 'grouped');
+set(gca, 'XTickLabel', classes);
+xlabel('Classes');
+ylabel('Score');
+title('Performance Metrics by Class');
+legend('Precision', 'Recall', 'F1-Score', 'Location', 'best');
+grid on;
+
+% AUC scores
+subplot(2, 2, 2);
+bar(auc_scores);
+set(gca, 'XTickLabel', classes);
+xlabel('Classes');
+ylabel('AUC Score');
+title('AUC Scores by Class');
+grid on;
+ylim([0, 1]);
+
+% Confusion matrix heatmap
+subplot(2, 2, 3);
+imagesc(confMat);
+colorbar;
+colormap('Blues');
+set(gca, 'XTick', 1:numClasses, 'XTickLabel', classes);
+set(gca, 'YTick', 1:numClasses, 'YTickLabel', classes);
+xlabel('Predicted Class');
+ylabel('True Class');
+title('Confusion Matrix Heatmap');
+
+% Add text annotations to confusion matrix
+for i = 1:numClasses
+    for j = 1:numClasses
+        text(j, i, num2str(confMat(i,j)), 'HorizontalAlignment', 'center', ...
+            'VerticalAlignment', 'middle', 'FontSize', 12, 'FontWeight', 'bold');
     end
-    
-    % Add noise robustness accuracies
-    noise_accs = zeros(1, length(snrLevels));
-    for i = 1:length(snrLevels)
-        snrLevel = snrLevels{i};
-        if isfield(noise_results, snrLevel)
-            noise_accs(i) = noise_results.(snrLevel).overall_accuracy;
-        end
-    end
-    
-    all_data = [primary_accuracy, age_accs, noise_accs];
-    all_labels = [{'Primary Dataset'}, ageGroupLabels, strcat('SNR ', snrLevels)];
-    
-    bar(1:length(all_data), all_data, 'grouped');
-    set(gca, 'XTickLabel', all_labels, 'XTickLabelRotation', 45);
-    ylabel('Accuracy');
-    title('Comprehensive Performance Summary');
-    grid on;
-    ylim([0, 1]);
-    
-    % Performance degradation analysis
-    subplot(3, 3, [4, 5]);
-    snr_values = [25, 20, 15]; % Assuming these are the SNR values
-    plot(snr_values, noise_accs, 'o-', 'LineWidth', 3, 'MarkerSize', 10);
-    xlabel('SNR (dB)');
-    ylabel('Accuracy');
-    title('Performance Degradation with Noise');
-    grid on;
-    
-    % Age group comparison
-    subplot(3, 3, [7, 8]);
-    bar(1:length(ageGroups), age_accs, 'FaceColor', [0.3, 0.7, 0.5]);
-    set(gca, 'XTickLabel', ageGroupLabels);
-    ylabel('Accuracy');
-    title('Performance Across Age Groups');
-    grid on;
-    ylim([0, 1]);
-    
-    % Key findings text
-    subplot(3, 3, [3, 6, 9]);
-    axis off;
-    
-    findings_text = {
-        '\bf{Key Findings:}'
-        ''
-        sprintf('• Primary Dataset Accuracy: %.2f%%', primary_accuracy*100)
-        ''
-        '\bf{Age-Stratified Analysis:}'
-    };
-    
-    for i = 1:length(ageGroups)
-        ageGroup = ageGroups{i};
-        if isfield(age_results, ageGroup)
-            findings_text{end+1} = sprintf('• %s: %.2f%%', ageGroupLabels{i}, age_results.(ageGroup).overall_accuracy*100);
-        end
-    end
-    
-    findings_text{end+1} = '';
-    findings_text{end+1} = '\bf{Noise Robustness:}';
-    
-    for i = 1:length(snrLevels)
-        snrLevel = snrLevels{i};
-        if isfield(noise_results, snrLevel)
-            findings_text{end+1} = sprintf('• SNR %s: %.2f%%', snrLevel, noise_results.(snrLevel).overall_accuracy*100);
-        end
-    end
-    
-    text(0.1, 0.9, findings_text, 'Units', 'normalized', 'VerticalAlignment', 'top', ...
-         'FontSize', 12, 'Interpreter', 'tex');
-    
-    saveas(fig, fullfile(resultsDir, 'comprehensive_summary.png'));
-    saveas(fig, fullfile(resultsDir, 'comprehensive_summary.fig'));
-    
-    % Generate comprehensive text report
-    reportFile = fullfile(resultsDir, 'comprehensive_summary_report.txt');
-    fid = fopen(reportFile, 'w');
-    fprintf(fid, 'ECG Classification - Comprehensive Analysis Summary\n');
-    fprintf(fid, '==================================================\n\n');
-    fprintf(fid, 'Model: AlexNet Transfer Learning\n');
-    fprintf(fid, 'Classes: %s\n', strjoin(classLabels, ', '));
-    fprintf(fid, 'Age Groups: %s\n', strjoin(ageGroupLabels, ', '));
-    fprintf(fid, 'SNR Levels: %s\n\n', strjoin(snrLevels, ', '));
-    
-    fprintf(fid, 'PRIMARY DATASET PERFORMANCE:\n');
-    fprintf(fid, 'Overall Accuracy: %.4f (%.2f%%)\n\n', primary_accuracy, primary_accuracy*100);
-    
-    fprintf(fid, 'AGE-STRATIFIED PERFORMANCE:\n');
-    for i = 1:length(ageGroups)
-        ageGroup = ageGroups{i};
-        if isfield(age_results, ageGroup)
-            fprintf(fid, '%s: %.4f (%.2f%%)\n', ageGroupLabels{i}, ...
-                    age_results.(ageGroup).overall_accuracy, age_results.(ageGroup).overall_accuracy*100);
-        end
-    end
-    fprintf(fid, '\n');
-    
-    fprintf(fid, 'NOISE ROBUSTNESS PERFORMANCE:\n');
-    for i = 1:length(snrLevels)
-        snrLevel = snrLevels{i};
-        if isfield(noise_results, snrLevel)
-            fprintf(fid, 'SNR %s: %.4f (%.2f%%)\n', snrLevel, ...
-                    noise_results.(snrLevel).overall_accuracy, noise_results.(snrLevel).overall_accuracy*100);
-        end
-    end
-    fprintf(fid, '\n');
-    
-    fprintf(fid, 'CLINICAL IMPLICATIONS:\n');
-    fprintf(fid, '• The model shows excellent performance on clean ECG data\n');
-    fprintf(fid, '• Age-stratified analysis reveals potential demographic biases\n');
-    fprintf(fid, '• Noise robustness analysis indicates suitability for wearable devices\n');
-    fprintf(fid, '• Performance degradation with increasing noise levels is within acceptable limits\n');
-    
-    fclose(fid);
-    close(fig);
 end
 
-function [precision, recall, f1_scores, confMat] = calculateDetailedMetrics(trueLabels, predictedLabels, classes)
-    % Calculate detailed classification metrics
-    
-    % Convert to categorical if needed
-    if ~iscategorical(trueLabels)
-        trueLabels = categorical(trueLabels);
-    end
-    if ~iscategorical(predictedLabels)
-        predictedLabels = categorical(predictedLabels);
-    end
-    
-    % Initialize metrics
-    precision = zeros(1, length(classes));
-    recall = zeros(1, length(classes));
-    f1_scores = zeros(1, length(classes));
-    
-    % Calculate confusion matrix
-    confMat = confusionmat(trueLabels, predictedLabels);
-    
-    % Calculate metrics for each class
-    for i = 1:length(classes)
-        tp = confMat(i, i);
-        fp = sum(confMat(:, i)) - tp;
-        fn = sum(confMat(i, :)) - tp;
-        
-        if (tp + fp) > 0
-            precision(i) = tp / (tp + fp);
-        else
-            precision(i) = 0;
-        end
-        
-        if (tp + fn) > 0
-            recall(i) = tp / (tp + fn);
-        else
-            recall(i) = 0;
-        end
-        
-        if (precision(i) + recall(i)) > 0
-            f1_scores(i) = 2 * (precision(i) * recall(i)) / (precision(i) + recall(i));
-        else
-            f1_scores(i) = 0;
-        end
-    end
+% Overall metrics summary
+subplot(2, 2, 4);
+axis off;
+summaryText = {
+    sprintf('Overall Accuracy: %.2f%%', accuracy * 100);
+    sprintf('Macro Precision: %.4f', macroPrecision);
+    sprintf('Macro Recall: %.4f', macroRecall);
+    sprintf('Macro F1-Score: %.4f', macroF1);
+    sprintf('Weighted Precision: %.4f', weightedPrecision);
+    sprintf('Weighted Recall: %.4f', weightedRecall);
+    sprintf('Weighted F1-Score: %.4f', weightedF1);
+    sprintf('Training Time: %.2f min', trainingTime/60);
+};
+
+text(0.1, 0.9, summaryText, 'FontSize', 12, 'VerticalAlignment', 'top', ...
+    'Units', 'normalized', 'FontWeight', 'bold');
+
+sgtitle('ECG Classification Performance Summary');
+saveas(gcf, fullfile(ResultsPath, 'performance_summary.png'));
+saveas(gcf, fullfile(ResultsPath, 'performance_summary.fig'));
+
+%% Save Results to Text File
+resultsFile = fullfile(ResultsPath, 'training_results.txt');
+fid = fopen(resultsFile, 'w');
+
+fprintf(fid, '=== ECG CLASSIFICATION TRAINING RESULTS ===\n');
+fprintf(fid, 'Date: %s\n', datestr(now));
+fprintf(fid, 'Dataset: %s\n', DatasetPath);
+fprintf(fid, 'Model: AlexNet Transfer Learning\n');
+fprintf(fid, 'Training Time: %.2f minutes\n\n', trainingTime/60);
+
+fprintf(fid, 'DATASET INFORMATION:\n');
+fprintf(fid, 'Total Images: %d\n', numel(images.Files));
+fprintf(fid, 'Training Images: %d\n', numel(TrainImages.Files));
+fprintf(fid, 'Validation Images: %d\n', numel(TestImages.Files));
+fprintf(fid, 'Classes: %s\n\n', strjoin(string(classes), ', '));
+
+fprintf(fid, 'OVERALL PERFORMANCE:\n');
+fprintf(fid, 'Accuracy: %.4f (%.2f%%)\n\n', accuracy, accuracy * 100);
+
+fprintf(fid, 'CLASS-WISE PERFORMANCE:\n');
+fprintf(fid, '%-8s %-10s %-10s %-10s %-10s %-10s\n', 'Class', 'Precision', 'Recall', 'F1-Score', 'Specificity', 'AUC');
+fprintf(fid, '%-8s %-10s %-10s %-10s %-10s %-10s\n', '-----', '---------', '------', '--------', '-----------', '---');
+
+for i = 1:numClasses
+    fprintf(fid, '%-8s %-10.4f %-10.4f %-10.4f %-10.4f %-10.4f\n', ...
+        string(classes{i}), precision(i), recall(i), f1Score(i), specificity(i), auc_scores(i));
 end
+
+fprintf(fid, '\nAVERAGE METRICS:\n');
+fprintf(fid, 'Macro - Precision: %.4f, Recall: %.4f, F1-Score: %.4f\n', macroPrecision, macroRecall, macroF1);
+fprintf(fid, 'Weighted - Precision: %.4f, Recall: %.4f, F1-Score: %.4f\n', weightedPrecision, weightedRecall, weightedF1);
+
+fprintf(fid, '\nCONFUSION MATRIX:\n');
+fprintf(fid, '%-8s', 'True\\Pred');
+for i = 1:numClasses
+    fprintf(fid, '%-8s', string(classes{i}));
+end
+fprintf(fid, '\n');
+
+for i = 1:numClasses
+    fprintf(fid, '%-8s', string(classes{i}));
+    for j = 1:numClasses
+        fprintf(fid, '%-8d', confMat(i,j));
+    end
+    fprintf(fid, '\n');
+end
+
+fclose(fid);
+
+%% Display Final Summary
+fprintf('\n=== TRAINING COMPLETED SUCCESSFULLY ===\n');
+fprintf('Results saved to: %s\n', ResultsPath);
+fprintf('Model file: %s\n', modelSavePath);
+fprintf('Results summary: %s\n', resultsFile);
+fprintf('\nGenerated files:\n');
+fprintf('- trained_alexnet_model.mat (trained model)\n');
+fprintf('- confusion_matrix.png/.fig\n');
+fprintf('- roc_curves.png/.fig\n');
+fprintf('- training_progress.png/.fig\n');
+fprintf('- performance_summary.png/.fig\n');
+fprintf('- training_results.txt\n');
+
+fprintf('\n=== FINAL PERFORMANCE SUMMARY ===\n');
+fprintf('Overall Accuracy: %.2f%%\n', accuracy * 100);
+fprintf('Macro F1-Score: %.4f\n', macroF1);
+fprintf('Weighted F1-Score: %.4f\n', weightedF1);
+fprintf('Training completed in %.2f minutes\n', trainingTime/60);
